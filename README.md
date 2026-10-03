@@ -6,7 +6,7 @@
 
 - `isSupported(bytes)`, `toSVG(bytes)` (debug only) and **`toJSON(bytes)`**: pages, shapes, text boxes with paragraphs and styled spans, and images (bitmap fills).
 - Runs in a Web Worker or in Node. About 1.2 MB of wasm (`-Oz`), 445 KB with brotli.
-- Reproducible build inside Docker (`./build.sh`), pinned Emscripten image and sha256-verified source tarballs. Nothing is installed on the host.
+- Build inside Docker (`./build.sh`) with a pinned Emscripten image and sha256-verified source tarballs; nothing is installed on the host. **Not bit-for-bit reproducible yet:** a local build and the CI build of the same commit differed by 2 bytes in the `.wasm` (an embedded build path or marker). The canonical binaries are the CI artifacts, with their `SHA256SUMS`.
 - **Two patches to libmspub** (`patches/`): a broken metadata stream no longer rejects the whole document, and Escher lengths are clamped so damaged files cannot loop on 32-bit `long` (wasm32). Both are intended for upstream.
 
 ### What is lost (known limitations)
