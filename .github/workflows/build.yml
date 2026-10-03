@@ -1,0 +1,47 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wasm:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the WebAssembly module (Docker, pinned emsdk)
+        run: ./build.sh
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # Apache POI test files (Apache-2.0, public): versions 98-2010, a brochure, a newsletter
+      # and three fuzzer-minimized broken files that must be rejected cleanly.
+      - name: Download the Apache POI .pub test files
+        run: |
+          mkdir -p corpus
+          gh api repos/apache/poi/contents/test-data/publisher --jq '.[] | select(.name|endswith(".pub")) | .download_url' \
+            | xargs -n1 -P4 curl -fsSL --retry 3 -O --output-dir corpus
+          ls corpus | wc -l
+        env:
+          GH_TOKEN: ${{ github.token }}
+
+      - name: Parse every file (Oz)
+        run: node test/run-corpus.mjs corpus --variant Oz
+
+      - name: sha256 of the artifacts
+        run: sha256sum dist/*/* | tee dist/SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: libmspub-wasm
+          path: dist/
+          retention-days: 30

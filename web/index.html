@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>libmspub en WebAssembly</title>
+<style>
+  :root {
+    --bg: #f6f5f2; --panel: #ffffff; --ink: #1d1d1b; --muted: #6b6a66;
+    --line: #dddad3; --accent: #1f5fbf; --bad: #b3261e; --ok: #1e7b34;
+    --page: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #161615; --panel: #1f1f1d; --ink: #ecebe7; --muted: #a3a29c;
+      --line: #34332f; --accent: #7aa7ee; --bad: #f2867e; --ok: #74c98a;
+      --page: #ffffff;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  header, main { max-width: 1200px; margin: 0 auto; padding: 16px; }
+  header h1 { font-size: 20px; margin: 8px 0 4px; }
+  header p { margin: 0; color: var(--muted); }
+  .controls { display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+              background: var(--panel); border: 1px solid var(--line);
+              border-radius: 8px; padding: 12px; margin-top: 16px; }
+  .drop { flex: 1 1 280px; border: 2px dashed var(--line); border-radius: 8px;
+          padding: 14px; text-align: center; color: var(--muted); cursor: pointer; }
+  .drop.over { border-color: var(--accent); color: var(--accent); }
+  select, button { font: inherit; padding: 6px 10px; border-radius: 6px;
+                   border: 1px solid var(--line); background: var(--bg); color: var(--ink); }
+  table.times { border-collapse: collapse; margin-top: 16px; width: 100%;
+                background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+  table.times td, table.times th { padding: 6px 10px; border-bottom: 1px solid var(--line); text-align: left; }
+  table.times td.num { text-align: right; font-variant-numeric: tabular-nums; }
+  .status { margin-top: 12px; min-height: 1.5em; }
+  .status.bad { color: var(--bad); } .status.ok { color: var(--ok); }
+  .tabs { display: flex; gap: 4px; margin-top: 20px; border-bottom: 1px solid var(--line); }
+  .tabs button { border-radius: 6px 6px 0 0; border-bottom: none; }
+  .tabs button[aria-selected="true"] { background: var(--panel); color: var(--accent); font-weight: 600; }
+  .pane { background: var(--panel); border: 1px solid var(--line); border-top: none;
+          border-radius: 0 0 8px 8px; padding: 12px; }
+  .pages { display: flex; flex-wrap: wrap; gap: 16px; }
+  figure { margin: 0; }
+  figure img { display: block; max-width: 100%; height: auto; background: var(--page);
+               box-shadow: 0 1px 4px rgba(0,0,0,.25); }
+  figcaption { color: var(--muted); font-size: 13px; margin-top: 4px; }
+  pre { margin: 0; max-height: 70vh; overflow: auto; font: 12px/1.4 ui-monospace, Consolas, monospace;
+        white-space: pre-wrap; word-break: break-all; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<header>
+  <h1>libmspub → WebAssembly (spike de OpenImprenta)</h1>
+  <p>Abrí un archivo de Microsoft Publisher (.pub). Todo se procesa en el navegador; el archivo no sale de tu equipo.</p>
+  <div class="controls">
+    <label class="drop" id="drop" tabindex="0">
+      <input type="file" id="file" accept=".pub" hidden>
+      Soltá un .pub acá o hacé clic para elegirlo
+    </label>
+    <label>Build
+      <select id="variant">
+        <option value="Oz">-Oz (más chico)</option>
+        <option value="O3">-O3 (más rápido)</option>
+      </select>
+    </label>
+  </div>
+  <div class="status" id="status">Cargando el módulo…</div>
+</header>
+<main>
+  <table class="times" id="times" hidden>
+    <thead><tr><th>Medición</th><th>Valor</th></tr></thead>
+    <tbody></tbody>
+  </table>
+  <div class="tabs" role="tablist" id="tabs" hidden>
+    <button role="tab" aria-selected="true" data-pane="svgPane">Páginas (SVG)</button>
+    <button role="tab" aria-selected="false" data-pane="jsonPane">JSON</button>
+  </div>
+  <section class="pane" id="svgPane" hidden><div class="pages" id="pages"></div></section>
+  <section class="pane" id="jsonPane" hidden>
+    <p><button id="download">Descargar JSON completo</button>
+       <small>(en la vista, los datos base64 de imágenes y fuentes se acortan)</small></p>
+    <pre id="json"></pre>
+  </section>
+</main>
+<script type="module" src="./app.js"></script>
+</body>
+</html>

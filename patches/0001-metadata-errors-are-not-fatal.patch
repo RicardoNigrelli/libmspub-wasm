@@ -1,0 +1,31 @@
+From: OpenImprenta spike <noreply@openimprenta.invalid>
+Subject: [PATCH] Do not abort the whole import when the OLE metadata is broken
+
+MSPUBParser::parse() calls parseMetaData() with the comment "No check:
+metadata are not important enough to fail if they can't be parsed", but an
+EndOfStreamException thrown while reading \005SummaryInformation or
+\005DocumentSummaryInformation escapes parse() and the document is rejected
+(MSPUBDocument::parse() catches it and returns false).
+
+Seen on Apache POI's SampleBrochure.pub and SampleNewsletter.pub: both fail
+with "Something bad happened here! Tell: 152" and no page is produced.
+
+--- a/src/lib/MSPUBParser.cpp
++++ b/src/lib/MSPUBParser.cpp
+@@ -188,7 +188,15 @@ bool MSPUBParser::parse()
+   if (!m_input->isStructured())
+     return false;
+   // No check: metadata are not important enough to fail if they can't be parsed
+-  parseMetaData();
++  try
++  {
++    parseMetaData();
++  }
++  catch (...)
++  {
++    MSPUB_DEBUG_MSG(("Couldn't parse metadata, ignoring.\n"));
++    m_input->seek(0, librevenge::RVNG_SEEK_SET);
++  }
+   std::unique_ptr<librevenge::RVNGInputStream> quill(m_input->getSubStreamByName("Quill/QuillSub/CONTENTS"));
+   if (!quill)
+   {
