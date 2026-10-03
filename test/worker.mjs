@@ -13,9 +13,10 @@ function median(xs) {
   return s[Math.floor(s.length / 2)];
 }
 
-function summarize(doc) {
+function summarize(doc, blobs) {
+  const blobSize = (o) => (o && typeof o.blob === 'number' && blobs[o.blob] ? blobs[o.blob].byteLength : 0);
   const counts = {};
-  let textChars = 0, textBoxes = 0, images = 0, imageBytes = 0, tables = 0;
+  let textChars = 0, textBoxes = 0, images = 0, imageBytes = 0, tables = 0, crops = 0;
   const imageTypes = {};
   const fonts = new Set(), colors = new Set();
   const boxTexts = [];
@@ -41,13 +42,14 @@ function summarize(doc) {
         boxTexts.push(t.trim());
       } else if (e.type === 'image') {
         images++;
-        imageBytes += e.data ? Math.floor(e.data.length * 3 / 4) : 0;
+        imageBytes += blobSize(e);
         imageTypes[e.mimeType] = (imageTypes[e.mimeType] || 0) + 1;
       }
       if (e.fill && e.fill.kind === 'bitmap') {
         // libmspub emits pictures as shapes with a bitmap fill
         images++;
-        imageBytes += e.fill.data ? Math.floor(e.fill.data.length * 3 / 4) : 0;
+        imageBytes += blobSize(e.fill);
+        if (e.fill.crop) crops++;
         imageTypes[e.fill.mimeType] = (imageTypes[e.fill.mimeType] || 0) + 1;
       } else if (e.type === 'table') {
         tables++;
@@ -62,7 +64,7 @@ function summarize(doc) {
   for (const t of boxTexts) if (t.length > 20) seen.set(t, (seen.get(t) || 0) + 1);
   const duplicatedStories = [...seen.values()].filter((n) => n > 1).length;
   return {
-    counts, textBoxes, textChars, images, imageBytes, imageTypes, tables,
+    counts, textBoxes, textChars, images, imageBytes, imageTypes, tables, crops,
     fonts: [...fonts], colors: [...colors], duplicatedStories,
     pageSizes: doc.pages.map((p) => `${p.width}x${p.height}`),
   };
@@ -106,17 +108,21 @@ try {
     try {
       const times = [];
       let doc;
+      let blobs;
       for (let i = 0; i < repeats; i++) {
         t = performance.now();
-        doc = pub.toJSON(bytes);
+        ({ doc, blobs } = pub.parse(bytes));
         times.push(performance.now() - t);
       }
+      result.heapBytes = pub.heapBytes();
+      result.blobs = blobs.length;
+      result.blobBytes = blobs.reduce((n, b) => n + b.byteLength, 0);
       result.jsonMs = median(times);
       result.pages = doc.pages.length;
       result.jsonBytes = doc.jsonBytes;
       result.parseOk = doc.parseOk;
       if (doc.error) result.jsonError = doc.error;
-      result.summary = summarize(doc);
+      result.summary = summarize(doc, blobs);
       result.calls = doc.stats.calls;
       result.metadata = doc.metadata;
       if (outDir) {

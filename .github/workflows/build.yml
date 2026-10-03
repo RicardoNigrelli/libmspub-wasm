@@ -37,6 +37,14 @@ jobs:
       - name: Parse every file (Oz)
         run: node test/run-corpus.mjs corpus --variant Oz
 
+      # No POI file has a cropped picture: this writes the MS-ODRAW crop properties into a copy of
+      # 51318.pub and checks that they reach the JSON (patch 0003).
+      - name: Picture crop (patch 0003)
+        run: node test/crop-fopt.mjs corpus --variant Oz
+
+      - name: Mutation smoke test (crashes / hangs)
+        run: node test/fuzz-smoke.mjs corpus --n 500 --seed 1
+
       - name: sha256 of the artifacts
         run: sha256sum dist/*/* | tee dist/SHA256SUMS
 

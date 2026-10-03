@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <utility>
 
 namespace oi
 {
@@ -116,6 +117,56 @@ void Json::serialize(std::string &out) const
 }
 
 // ---------------------------------------------------------------------------
+// Base64 (librevenge hands binary data over as base64 strings)
+// ---------------------------------------------------------------------------
+
+bool decodeBase64(const char *in, size_t len, std::vector<unsigned char> &out)
+{
+  // 0-63: value, 64: '=', 65: whitespace, 255: invalid
+  static unsigned char table[256];
+  static bool tableReady = false;
+  if (!tableReady)
+  {
+    for (unsigned char &t : table)
+      t = 255;
+    const char *alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    for (unsigned i = 0; i < 64; ++i)
+      table[static_cast<unsigned char>(alphabet[i])] = static_cast<unsigned char>(i);
+    table[static_cast<unsigned char>('=')] = 64;
+    table[static_cast<unsigned char>(' ')] = table[static_cast<unsigned char>('\n')] = 65;
+    table[static_cast<unsigned char>('\r')] = table[static_cast<unsigned char>('\t')] = 65;
+    tableReady = true;
+  }
+  out.resize(len / 4 * 3 + 3);
+  size_t o = 0;
+  unsigned acc = 0;
+  int bits = 0;
+  size_t pad = 0;
+  for (size_t i = 0; i < len; ++i)
+  {
+    const unsigned char v = table[static_cast<unsigned char>(in[i])];
+    if (v < 64)
+    {
+      if (pad)
+        return false; // data after padding
+      acc = (acc << 6) | v;
+      bits += 6;
+      if (bits >= 8)
+      {
+        bits -= 8;
+        out[o++] = static_cast<unsigned char>((acc >> bits) & 0xFF);
+      }
+    }
+    else if (v == 64)
+      ++pad;
+    else if (v != 65)
+      return false;
+  }
+  out.resize(o);
+  return pad <= 2;
+}
+
+// ---------------------------------------------------------------------------
 // Property conversion
 // ---------------------------------------------------------------------------
 
@@ -198,8 +249,39 @@ static Json strOrNull(const librevenge::RVNGPropertyList &l, const char *k)
   return p ? Json::string(p->getStr().cstr()) : Json::null();
 }
 
+// Number of a non-ODF property set by our libmspub patches, or null.
+static Json numberOrNull(const librevenge::RVNGPropertyList &l, const char *k)
+{
+  const librevenge::RVNGProperty *p = P(l, k);
+  if (!p)
+    return Json::null();
+  const double v = p->getDouble();
+  return std::isfinite(v) ? Json::number(v) : Json::null();
+}
+
+Json JSONDrawingGenerator::blobFrom(const librevenge::RVNGProperty *prop, const librevenge::RVNGProperty *mimeType)
+{
+  if (!prop)
+    return Json::null();
+  const librevenge::RVNGString b64 = prop->getStr();
+  Blob blob;
+  if (!decodeBase64(b64.cstr(), b64.size(), blob.data) || blob.data.empty())
+  {
+    count("!badBinaryData");
+    return Json::null();
+  }
+  blob.mimeType = mimeType ? mimeType->getStr().cstr() : "";
+  // libmspub repeats the picture in every setStyle() that carries its fill
+  // (fill, then stroke) and in every shape that uses it: store it once.
+  for (size_t i = 0; i < m_blobs.size(); ++i)
+    if (m_blobs[i].mimeType == blob.mimeType && m_blobs[i].data == blob.data)
+      return Json::number(double(i));
+  m_blobs.push_back(std::move(blob));
+  return Json::number(double(m_blobs.size() - 1));
+}
+
 // Curated summary of the current graphic style (fill + stroke).
-static Json summarizeStyle(const librevenge::RVNGPropertyList &style)
+Json JSONDrawingGenerator::summarizeStyle(const librevenge::RVNGPropertyList &style)
 {
   Json out = Json::object();
 
@@ -225,8 +307,22 @@ static Json summarizeStyle(const librevenge::RVNGPropertyList &style)
     fill.set("mimeType", strOrNull(style, "librevenge:mime-type"));
     fill.set("repeat", strOrNull(style, "style:repeat"));
     // libmspub draws pictures as shapes with a bitmap fill (not with
-    // drawGraphicObject): the picture itself is here, base64-encoded.
-    fill.set("data", strOrNull(style, "draw:fill-image"));
+    // drawGraphicObject). The picture travels as a binary blob.
+    fill.set("blob", blobFrom(P(style, "draw:fill-image"), P(style, "librevenge:mime-type")));
+    // Picture crop (patch 0003): fractions of the picture hidden on each side.
+    Json top = numberOrNull(style, "libmspub:crop-from-top");
+    Json right = numberOrNull(style, "libmspub:crop-from-right");
+    Json bottom = numberOrNull(style, "libmspub:crop-from-bottom");
+    Json left = numberOrNull(style, "libmspub:crop-from-left");
+    if (top.type == Json::Num || right.type == Json::Num || bottom.type == Json::Num || left.type == Json::Num)
+    {
+      Json crop = Json::object();
+      crop.set("top", top.type == Json::Num ? top : Json::number(0));
+      crop.set("right", right.type == Json::Num ? right : Json::number(0));
+      crop.set("bottom", bottom.type == Json::Num ? bottom : Json::number(0));
+      crop.set("left", left.type == Json::Num ? left : Json::number(0));
+      fill.set("crop", std::move(crop));
+    }
   }
   out.set("fill", fill);
 
@@ -264,7 +360,7 @@ JSONDrawingGenerator::JSONDrawingGenerator()
     m_listOrdered(), m_link(), m_inLink(false), m_pages(0), m_orphanText(0)
 {
   m_doc.set("format", Json::string("openimprenta-libmspub-json"));
-  m_doc.set("version", Json::number(1));
+  m_doc.set("version", Json::number(2));
   m_doc.set("units", Json::string("pt"));
   m_doc.set("metadata", Json::object());
   m_doc.set("embeddedFonts", Json::array());
@@ -276,9 +372,26 @@ JSONDrawingGenerator::~JSONDrawingGenerator() {}
 
 unsigned JSONDrawingGenerator::pageCount() const { return m_pages; }
 
-std::string JSONDrawingGenerator::result() const
+std::vector<Blob> JSONDrawingGenerator::takeBlobs()
 {
-  Json doc = m_doc;
+  std::vector<Blob> out;
+  out.swap(m_blobs);
+  return out;
+}
+
+std::string JSONDrawingGenerator::result()
+{
+  // No copy of the tree: the statistics go into m_doc itself.
+  Json &doc = m_doc;
+  Json blobs = Json::array();
+  for (const Blob &b : m_blobs)
+  {
+    Json o = Json::object();
+    o.set("size", Json::number(double(b.data.size())));
+    o.set("mimeType", Json::string(b.mimeType));
+    blobs.push(std::move(o));
+  }
+  doc.set("blobs", std::move(blobs));
   Json calls = Json::object();
   for (const auto &kv : m_calls)
     calls.set(kv.first, Json::number(kv.second));
@@ -366,7 +479,7 @@ void JSONDrawingGenerator::defineEmbeddedFont(const librevenge::RVNGPropertyList
   Json f = Json::object();
   f.set("name", strOrNull(propList, "librevenge:name"));
   f.set("mimeType", strOrNull(propList, "librevenge:mime-type"));
-  f.set("data", strOrNull(propList, "office:binary-data"));
+  f.set("blob", blobFrom(P(propList, "office:binary-data"), P(propList, "librevenge:mime-type")));
   f.set("props", propsToJson(propList, true));
   m_doc.get("embeddedFonts")->push(std::move(f));
 }
@@ -494,8 +607,7 @@ void JSONDrawingGenerator::drawGraphicObject(const librevenge::RVNGPropertyList 
   img.set("height", lengthOrNull(propList, "svg:height"));
   img.set("rotate", lengthOrNull(propList, "librevenge:rotate"));
   img.set("mimeType", strOrNull(propList, "librevenge:mime-type"));
-  const librevenge::RVNGProperty *data = propList["office:binary-data"];
-  img.set("data", data ? Json::string(data->getStr().cstr()) : Json::null());
+  img.set("blob", blobFrom(propList["office:binary-data"], propList["librevenge:mime-type"]));
   img.set("props", propsToJson(propList, true));
   children->push(std::move(img));
 }

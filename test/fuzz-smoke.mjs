@@ -89,6 +89,8 @@ if (isMainThread) {
     }
     console.log(`dumped ${wanted.size} mutants to ${dump}`);
   }
+  // exit code for CI: any trap or hang is a failure
+  if (traps.length) process.exit(1);
 } else {
   const { loadLibmspub, LibmspubCrash } = await import('../js/libmspub.mjs');
   const { start, n, seed, variant, corpus } = workerData;
@@ -111,7 +113,7 @@ if (isMainThread) {
       if (!pub.isSupported(m)) result = 'unsupported';
       else {
         try {
-          const doc = pub.toJSON(m);
+          const { doc } = pub.parse(m);
           result = doc.parseOk ? 'ok' : 'partial';
         } catch (e) {
           if (e instanceof LibmspubCrash) throw e;

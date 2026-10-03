@@ -87,9 +87,12 @@ async function processFile(file) {
     t = performance.now();
     let doc = null;
     let jsonError = null;
-    try { doc = pub.toJSON(bytes); } catch (e) { jsonError = e; }
+    let blobs = [];
+    try { ({ doc, blobs } = pub.parse(bytes)); } catch (e) { jsonError = e; }
     const tJson = performance.now() - t;
-    tbody.append(row('toJSON()', jsonError ? `error: ${jsonError.message}` : `${doc.pages.length} páginas · ${(doc.jsonBytes / 1024).toFixed(1)} KB · ${tJson.toFixed(1)} ms`));
+    const blobKb = blobs.reduce((n, b) => n + b.byteLength, 0) / 1024;
+    tbody.append(row('parse()', jsonError ? `error: ${jsonError.message}` : `${doc.pages.length} páginas · JSON ${(doc.jsonBytes / 1024).toFixed(1)} KB · ${blobs.length} blobs (${blobKb.toFixed(1)} KB) · ${tJson.toFixed(1)} ms`));
+    tbody.append(row('Memoria wasm', `${(pub.heapBytes() / 1048576).toFixed(1)} MB`));
 
     pages.forEach((svg, i) => {
       const url = URL.createObjectURL(new Blob([svg], { type: 'image/svg+xml' }));

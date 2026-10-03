@@ -1,0 +1,203 @@
+From: OpenImprenta <noreply@openimprenta.invalid>
+Subject: [PATCH] Read the picture crop (Escher cropFromTop/Bottom/Left/Right)
+
+Publisher stores the crop of a picture in the shape's FOPT record, next to
+the picture id (pib), as the MS-ODRAW Blip properties cropFromTop (0x0100),
+cropFromBottom (0x0101), cropFromLeft (0x0102) and cropFromRight (0x0103):
+signed 16.16 fixed point fractions of the picture. libmspub did not read
+them, so a cropped picture was imported whole, stretched into the visible
+frame.
+
+The values are now kept in ShapeInfo and passed on with the bitmap fill
+(ImgFill::getProperties), as four non-ODF properties in RVNG_GENERIC units:
+
+  libmspub:crop-from-top     fraction of the picture height hidden at the top
+  libmspub:crop-from-bottom  fraction of the picture height hidden at the bottom
+  libmspub:crop-from-left    fraction of the picture width hidden at the left
+  libmspub:crop-from-right   fraction of the picture width hidden at the right
+
+They are emitted only when at least one of them is non-zero, with the value
+as stored (negative values, which MS-ODRAW allows, mean padding). Only the
+Escher path (Publisher 2002 and later) is covered; MSPUBParser2k is unchanged.
+
+diff --git a/src/lib/EscherFieldIds.h b/src/lib/EscherFieldIds.h
+index 6245ea4..7d4542c 100644
+--- a/src/lib/EscherFieldIds.h
++++ b/src/lib/EscherFieldIds.h
+@@ -74,6 +74,10 @@
+ #define FIELDID_END_ARROW_STYLE        0x01D1
+ #define FIELDID_END_ARROW_WIDTH        0x01D4
+ #define FIELDID_END_ARROW_HEIGHT       0x01D5
++#define FIELDID_CROP_FROM_TOP          0x0100
++#define FIELDID_CROP_FROM_BOTTOM       0x0101
++#define FIELDID_CROP_FROM_LEFT         0x0102
++#define FIELDID_CROP_FROM_RIGHT        0x0103
+ #define FIELDID_PICTURE_CONTRAST       0x0108
+ #define FIELDID_PICTURE_BRIGHTNESS     0x0109
+ #define FIELDID_PICTURE_RECOLOR        0x011A
+diff --git a/src/lib/Fill.cpp b/src/lib/Fill.cpp
+index ccb3d42..759268e 100644
+--- a/src/lib/Fill.cpp
++++ b/src/lib/Fill.cpp
+@@ -22,10 +22,16 @@ Fill::Fill(const MSPUBCollector *owner) : m_owner(owner)
+ {
+ }
+ 
+-ImgFill::ImgFill(unsigned imgIndex, const MSPUBCollector *owner, bool isTexture, int rot) : Fill(owner), m_imgIndex(imgIndex), m_isTexture(isTexture), m_rotation(rot)
++ImgFill::ImgFill(unsigned imgIndex, const MSPUBCollector *owner, bool isTexture, int rot) : Fill(owner), m_imgIndex(imgIndex), m_isTexture(isTexture), m_rotation(rot), m_hasCrop(false), m_crop(0, 0, 0, 0)
+ {
+ }
+ 
++void ImgFill::setCrop(const PictureCrop &crop)
++{
++  m_hasCrop = true;
++  m_crop = crop;
++}
++
+ void ImgFill::getProperties(librevenge::RVNGPropertyList *out) const
+ {
+   out->insert("draw:fill", "bitmap");
+@@ -45,6 +51,15 @@ void ImgFill::getProperties(librevenge::RVNGPropertyList *out) const
+       sValue.sprintf("%d", m_rotation);
+       out->insert("librevenge:rotate", sValue);
+     }
++    if (m_hasCrop)
++    {
++      // Not ODF: there is no standard property for this. Fractions of the
++      // picture (1.0 = whole picture) hidden on each side, as in MS-ODRAW.
++      out->insert("libmspub:crop-from-top", m_crop.m_top / 65536.0, librevenge::RVNG_GENERIC);
++      out->insert("libmspub:crop-from-bottom", m_crop.m_bottom / 65536.0, librevenge::RVNG_GENERIC);
++      out->insert("libmspub:crop-from-left", m_crop.m_left / 65536.0, librevenge::RVNG_GENERIC);
++      out->insert("libmspub:crop-from-right", m_crop.m_right / 65536.0, librevenge::RVNG_GENERIC);
++    }
+   }
+ }
+ 
+diff --git a/src/lib/Fill.h b/src/lib/Fill.h
+index 39c5cab..0019f8e 100644
+--- a/src/lib/Fill.h
++++ b/src/lib/Fill.h
+@@ -19,6 +19,19 @@
+ namespace libmspub
+ {
+ class MSPUBCollector;
++
++// Picture crop (MS-ODRAW cropFromTop/Bottom/Left/Right): signed 16.16 fixed
++// point fractions of the picture, positive = cropped, negative = padding.
++struct PictureCrop
++{
++  int m_top;
++  int m_bottom;
++  int m_left;
++  int m_right;
++  PictureCrop(int top, int bottom, int left, int right)
++    : m_top(top), m_bottom(bottom), m_left(left), m_right(right) { }
++};
++
+ class Fill
+ {
+ protected:
+@@ -40,11 +53,15 @@ private:
+   bool m_isTexture;
+ protected:
+   int m_rotation;
++private:
++  bool m_hasCrop;
++  PictureCrop m_crop;
+ public:
+   ImgFill(unsigned imgIndex, const MSPUBCollector *owner, bool isTexture, int rotation);
++  void setCrop(const PictureCrop &crop);
+   void getProperties(librevenge::RVNGPropertyList *out) const override;
+ private:
+-  ImgFill(const ImgFill &) : Fill(nullptr), m_imgIndex(0), m_isTexture(false), m_rotation(0) { }
++  ImgFill(const ImgFill &) : Fill(nullptr), m_imgIndex(0), m_isTexture(false), m_rotation(0), m_hasCrop(false), m_crop(0, 0, 0, 0) { }
+   ImgFill &operator=(const ImgFill &);
+ };
+ 
+diff --git a/src/lib/MSPUBCollector.cpp b/src/lib/MSPUBCollector.cpp
+index 73c7264..d3a5363 100644
+--- a/src/lib/MSPUBCollector.cpp
++++ b/src/lib/MSPUBCollector.cpp
+@@ -376,6 +376,11 @@ void MSPUBCollector::setShapePictureContrast(unsigned seqNum,
+   m_shapeInfosBySeqNum[seqNum].m_pictureContrast = contrast;
+ }
+ 
++void MSPUBCollector::setShapePictureCrop(unsigned seqNum, const PictureCrop &crop)
++{
++  m_shapeInfosBySeqNum[seqNum].m_pictureCrop = crop;
++}
++
+ void MSPUBCollector::setShapeBeginArrow(unsigned seqNum,
+                                         const Arrow &arrow)
+ {
+@@ -676,7 +681,10 @@ void MSPUBCollector::setupShapeStructures(ShapeGroupElement &elt)
+         rot = ptr_info->m_innerRotation.get();
+       if (index - 1 < m_images.size())
+       {
+-        ptr_info->m_fill = std::shared_ptr<const Fill>(new ImgFill(index, this, false, rot));
++        std::shared_ptr<ImgFill> imgFill(new ImgFill(index, this, false, rot));
++        if (bool(ptr_info->m_pictureCrop))
++          imgFill->setCrop(ptr_info->m_pictureCrop.get());
++        ptr_info->m_fill = imgFill;
+       }
+     }
+     elt.setShapeInfo(*ptr_info);
+diff --git a/src/lib/MSPUBCollector.h b/src/lib/MSPUBCollector.h
+index a1f0db3..66aebc1 100644
+--- a/src/lib/MSPUBCollector.h
++++ b/src/lib/MSPUBCollector.h
+@@ -72,6 +72,7 @@ public:
+   void setShapePictureRecolor(unsigned seqNum, const ColorReference &recolor);
+   void setShapePictureBrightness(unsigned seqNum, int brightness);
+   void setShapePictureContrast(unsigned seqNum, int contrast);
++  void setShapePictureCrop(unsigned seqNum, const PictureCrop &crop);
+   void setShapeTableInfo(unsigned seqNum, const TableInfo &ti);
+   void setShapeBorderImageId(unsigned seqNum, unsigned borderImageId);
+   void setShapeCoordinatesInEmu(unsigned seqNum, int xs, int ys, int xe, int ye);
+diff --git a/src/lib/MSPUBParser.cpp b/src/lib/MSPUBParser.cpp
+index a3ea63a..2e7da30 100644
+--- a/src/lib/MSPUBParser.cpp
++++ b/src/lib/MSPUBParser.cpp
+@@ -1720,6 +1720,21 @@ void MSPUBParser::parseEscherShape(librevenge::RVNGInputStream *input, const Esc
+             {
+               m_collector->setShapePictureContrast(*shapeSeqNum, (int)(*ptr_pictureContrast));
+             }
++            // MS-ODRAW Blip properties cropFromTop/Bottom/Left/Right: signed 16.16
++            // fixed point fractions of the picture, default 0 (no crop).
++            const unsigned *ptr_cropTop = getIfExists(foptValues.m_scalarValues, FIELDID_CROP_FROM_TOP);
++            const unsigned *ptr_cropBottom = getIfExists(foptValues.m_scalarValues, FIELDID_CROP_FROM_BOTTOM);
++            const unsigned *ptr_cropLeft = getIfExists(foptValues.m_scalarValues, FIELDID_CROP_FROM_LEFT);
++            const unsigned *ptr_cropRight = getIfExists(foptValues.m_scalarValues, FIELDID_CROP_FROM_RIGHT);
++            if ((ptr_cropTop && *ptr_cropTop) || (ptr_cropBottom && *ptr_cropBottom) ||
++                (ptr_cropLeft && *ptr_cropLeft) || (ptr_cropRight && *ptr_cropRight))
++            {
++              m_collector->setShapePictureCrop(*shapeSeqNum, PictureCrop(
++                                                 ptr_cropTop ? (int)(*ptr_cropTop) : 0,
++                                                 ptr_cropBottom ? (int)(*ptr_cropBottom) : 0,
++                                                 ptr_cropLeft ? (int)(*ptr_cropLeft) : 0,
++                                                 ptr_cropRight ? (int)(*ptr_cropRight) : 0));
++            }
+           }
+           unsigned *ptr_lineBackColor =
+             getIfExists(foptValues.m_scalarValues, FIELDID_LINE_BACK_COLOR);
+diff --git a/src/lib/ShapeInfo.h b/src/lib/ShapeInfo.h
+index ff50787..e564514 100644
+--- a/src/lib/ShapeInfo.h
++++ b/src/lib/ShapeInfo.h
+@@ -67,6 +67,7 @@ struct ShapeInfo
+   std::vector<libmspub::Vertex> m_clipPath;
+   boost::optional<int> m_pictureBrightness;
+   boost::optional<int> m_pictureContrast;
++  boost::optional<PictureCrop> m_pictureCrop;
+   ShapeInfo() : m_type(), m_cropType(), m_imgIndex(), m_borderImgIndex(),
+     m_coordinates(), m_lines(), m_pageSeqNum(),
+     m_textId(), m_adjustValuesByIndex(), m_adjustValues(),
+@@ -75,7 +76,7 @@ struct ShapeInfo
+     m_lineBackColor(), m_dash(), m_tableInfo(),
+     m_numColumns(),
+     m_columnSpacing(0), m_beginArrow(), m_endArrow(),
+-    m_verticalAlign(), m_pictureRecolor(), m_shadow(), m_innerRotation(), m_clipPath(), m_pictureBrightness(), m_pictureContrast()
++    m_verticalAlign(), m_pictureRecolor(), m_shadow(), m_innerRotation(), m_clipPath(), m_pictureBrightness(), m_pictureContrast(), m_pictureCrop()
+   {
+   }
+   std::shared_ptr<const CustomShape> getCustomShape() const

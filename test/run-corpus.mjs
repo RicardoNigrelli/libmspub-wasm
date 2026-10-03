@@ -67,8 +67,8 @@ for (const f of files) {
 const fmt = (x, d = 1) => (x === undefined || x === null ? '' : Number(x).toFixed(d));
 const kb = (x) => (x === undefined ? '' : (x / 1024).toFixed(1));
 const lines = [
-  '| Archivo | KB | ¿Soportado? | Páginas | parse JSON (ms) | parse SVG (ms) | JSON (KB) | SVG (KB) | Texto (cajas / caracteres) | Formas | Imágenes | Tablas | Resultado |',
-  '|---|---:|:---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---|',
+  '| Archivo | KB | ¿Soportado? | Páginas | parse JSON (ms) | parse SVG (ms) | JSON (KB) | Blobs (n / KB) | SVG (KB) | Texto (cajas / caracteres) | Formas | Imágenes | Tablas | Resultado |',
+  '|---|---:|:---:|---:|---:|---:|---:|---:|---:|---|---:|---:|---:|---|',
 ];
 for (const r of results) {
   const s = r.summary || {};
@@ -80,7 +80,7 @@ for (const r of results) {
     : r.parseOk === false ? 'parcial (parse() = false)'
     : r.pages === 0 ? 'vacío (parse() = true, 0 páginas)'
     : 'ok';
-  lines.push(`| ${r.file} | ${kb(r.bytes)} | ${r.supported === undefined ? '?' : r.supported ? 'sí' : 'no'} | ${r.pages ?? ''} | ${fmt(r.jsonMs)} | ${fmt(r.svgMs)} | ${kb(r.jsonBytes)} | ${kb(r.svgBytes)} | ${s.textBoxes ?? ''} / ${s.textChars ?? ''} | ${r.summary ? shapes : ''} | ${s.images ? `${s.images} (${Object.entries(s.imageTypes).map(([k, v]) => `${v} ${String(k).replace('image/', '')}`).join(', ')})` : s.images ?? ''} | ${s.tables ?? ''} | ${status} |`);
+  lines.push(`| ${r.file} | ${kb(r.bytes)} | ${r.supported === undefined ? '?' : r.supported ? 'sí' : 'no'} | ${r.pages ?? ''} | ${fmt(r.jsonMs)} | ${fmt(r.svgMs)} | ${kb(r.jsonBytes)} | ${r.blobs === undefined ? '' : `${r.blobs} / ${kb(r.blobBytes)}`} | ${kb(r.svgBytes)} | ${s.textBoxes ?? ''} / ${s.textChars ?? ''} | ${r.summary ? shapes : ''} | ${s.images ? `${s.images} (${Object.entries(s.imageTypes).map(([k, v]) => `${v} ${String(k).replace('image/', '')}`).join(', ')})` : s.images ?? ''} | ${s.tables ?? ''} | ${status} |`);
 }
 mkdirSync(outDir, { recursive: true });
 writeFileSync(join(outDir, 'results.json'), JSON.stringify(results, null, 2));

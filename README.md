@@ -4,19 +4,22 @@
 
 > **Status: experimental.** Built for [OpenImprenta](#context), a free desktop publishing app being developed after Microsoft retired Publisher from Microsoft 365 (1 October 2026).
 
-- `isSupported(bytes)`, `toSVG(bytes)` (debug only) and **`toJSON(bytes)`**: pages, shapes, text boxes with paragraphs and styled spans, and images (bitmap fills).
-- Runs in a Web Worker or in Node. About 1.2 MB of wasm (`-Oz`), 445 KB with brotli.
+- `isSupported(bytes)`, `toSVG(bytes)` (debug only) and **`parse(bytes)` → `{ doc, blobs }`**: pages, shapes, text boxes with paragraphs and styled spans, and images (bitmap fills) with their crop. Since JSON format **version 2** the pictures are **not** in the JSON: each one is a separate binary blob (a `Uint8Array` with its own `ArrayBuffer`, transferable from a worker without copying) and the JSON refers to it as `"blob": n`. `toJSON(bytes)` still returns the old version 1 shape (base64 inside) for compatibility.
+- Runs in a Web Worker or in Node. About 1.2 MB of wasm (`-Oz`), 448 KB with brotli.
 - Build inside Docker (`./build.sh`) with a pinned Emscripten image and sha256-verified source tarballs; nothing is installed on the host. **Not bit-for-bit reproducible yet:** a local build and the CI build of the same commit differed by 2 bytes in the `.wasm` (an embedded build path or marker). The canonical binaries are the CI artifacts, with their `SHA256SUMS`.
-- **Two patches to libmspub** (`patches/`): a broken metadata stream no longer rejects the whole document, and Escher lengths are clamped so damaged files cannot loop on 32-bit `long` (wasm32). Both are intended for upstream.
+- **Three patches to libmspub** (`patches/`): a broken metadata stream no longer rejects the whole document; Escher lengths are clamped so damaged files cannot loop on 32-bit `long` (wasm32); and the picture crop (Escher `cropFromTop/Bottom/Left/Right`) is read and passed on with the bitmap fill. All are intended for upstream.
+- **Memory:** with a real 62 MB job (5 pages, one JPEG photo per page), binary blobs cut the JSON from 16.4 MB to 3.7 KB, the wasm heap from 391 to 250 MB and the peak RSS of a Node process from about 500 to 374 MB (`test/measure-memory.mjs`). Details below.
 
 ### What is lost (known limitations)
-Linked text box chains (the full story is repeated in each box), shape types (everything arrives as polygons), hyperlink targets, page-number fields, CMYK/spot colours and colour-scheme indices, WordArt text, master pages (flattened), and picture **crop** (Escher `cropFromTop/Bottom/Left/Right` are not read by libmspub). WMF/EMF pictures are passed through but browsers cannot draw them. Details below (in Spanish).
+Linked text box chains (the full story is repeated in each box), shape types (everything arrives as polygons), hyperlink targets, page-number fields, CMYK/spot colours and colour-scheme indices, WordArt text, master pages (flattened), and **everything in the scratch area** (libmspub hard-codes four page records as "dummy" pages and drops their shapes). WMF/EMF pictures are passed through but browsers cannot draw them. Details below (in Spanish).
 
 ### Build and test
 ```bash
 ./build.sh                                   # -> dist/Oz, dist/O3
 node test/run-corpus.mjs path/to/pub-files   # parse every .pub, report pages, timings, errors
 node test/fuzz-smoke.mjs path/to/pub-files   # mutation smoke test (crashes / hangs)
+node test/crop-fopt.mjs path/to/poi-files    # picture crop, on a POI file with crop properties written per MS-ODRAW
+node --expose-gc test/measure-memory.mjs file.pub   # peak RSS, wasm heap, JSON and blob sizes of one parse
 ```
 CI builds the module and runs it over the public Apache POI test files (Apache-2.0).
 
@@ -30,7 +33,7 @@ OpenImprenta is a free (GPL-2.0-or-later) desktop publishing web app for non-pro
 
 ---
 
-**En español:** lector de archivos `.pub` de Microsoft Publisher para el navegador: libmspub compilado a WebAssembly, con un generador JSON propio. Experimental. Licencia MPL-2.0. Debajo sigue el informe técnico completo del prototipo, con resultados, el esquema del JSON y lo que se pierde.
+**En español:** lector de archivos `.pub` de Microsoft Publisher para el navegador: libmspub compilado a WebAssembly, con un generador JSON propio. Experimental. Licencia MPL-2.0. Desde el 3/10/2026 las imágenes salen como **bloques binarios aparte** del JSON (formato 2: con un trabajo real de 62 MB el JSON pasa de 16,4 MB a 3,7 KB y la memoria del wasm de 391 a 250 MB) y se lee el **recorte de imagen** (parche 0003). Debajo sigue el informe técnico completo, con resultados, el esquema del JSON y lo que se pierde.
 
 ---
 
@@ -62,10 +65,12 @@ Prototipo descartable para leer archivos de Microsoft Publisher (`.pub`) dentro 
 | `icu/make-icudata.sh` | Arma el paquete de datos ICU con solo los conversores que pide libmspub. |
 | `src/JSONDrawingGenerator.{h,cpp}` | **Generador propio**: implementa `librevenge::RVNGDrawingInterface` y serializa a JSON. |
 | `src/binding.cpp`, `src/compile.sh` | Funciones exportadas con embind y enlace (`-O3`, `-Oz` y la variante de comparación sin datos ICU). |
-| `js/libmspub.mjs` | Envoltorio ES module: `loadLibmspub()` → `isSupported` / `toSVG` / `toJSON`. Reinstancia el módulo si el wasm hace *trap*. |
+| `js/libmspub.mjs` | Envoltorio ES module: `loadLibmspub()` → `isSupported` / `parse` / `toJSON` / `toSVG` / `heapBytes` / `dispose`, y `parseWithModule()` para quien carga el glue por su cuenta. Reinstancia el módulo si el wasm hace *trap*. |
 | `web/` | Página de prueba. |
 | `test/run-corpus.mjs` (+ `worker.mjs`) | Procesa una carpeta de `.pub`, un worker por archivo con timeout. Escribe `out/<build>/results.{json,md}`, los SVG y el JSON de cada documento. |
 | `test/measure.mjs` | Tamaños (crudo, gzip, brotli) y tiempo de carga. |
+| `test/measure-memory.mjs` | Memoria de leer **un** `.pub` en un proceso nuevo: pico de RSS, memoria del wasm, tamaño del JSON y de los blobs, tiempo. |
+| `test/crop-fopt.mjs` | Recorte de imagen de punta a punta: escribe `cropFromTop/Bottom/Left/Right` según MS-ODRAW en una copia de `51318.pub` y comprueba `fill.crop`. |
 | `test/fuzz-smoke.mjs` | Prueba de robustez con mutaciones deterministas (no es un fuzzer de verdad). |
 | `test/inspect.mjs` | Resume un `document.json`: historias repetidas, colores, fuentes, tipos de imagen. |
 | `tools/native/Dockerfile` | libmspub **nativo** (x86-64) con `pub2xhtml`, solo para diagnóstico: distingue fallas de libmspub de fallas del port. |
@@ -138,6 +143,12 @@ node test/run-corpus.mjs ../../corpus/poi --variant O3 --repeats 5 --timeout 300
 # tamaños y tiempo de carga
 node test/measure.mjs --runs 20
 
+# memoria de leer UN archivo (proceso nuevo): pico de RSS, memoria del wasm, JSON y blobs
+node --expose-gc test/measure-memory.mjs archivo.pub
+
+# recorte de imagen sobre una copia de 51318.pub con las propiedades de MS-ODRAW escritas a mano
+node test/crop-fopt.mjs ../../corpus/poi
+
 # robustez: N mutantes deterministas (--dump <dir> guarda los que fallan)
 node test/fuzz-smoke.mjs --n 5000 --seed 3
 
@@ -151,13 +162,32 @@ La página acepta un `.pub` por input o arrastrándolo, permite elegir el build 
 API JS:
 
 ```js
-import { loadLibmspub, LibmspubCrash } from './js/libmspub.mjs';
+import { loadLibmspub, LibmspubCrash, LibmspubError } from './js/libmspub.mjs';
 const pub = await loadLibmspub({ variant: 'Oz' });
 pub.isSupported(bytes);   // boolean
-pub.toSVG(bytes);         // string[]: una página SVG por elemento
-pub.toJSON(bytes);        // objeto (esquema más abajo); lanza Error si no es un .pub
+const { doc, blobs } = pub.parse(bytes);
+                          // doc: JSON formato 2 (esquema más abajo); blobs: Uint8Array[], uno por imagen o
+                          // fuente, cada uno con su propio ArrayBuffer (se transfiere sin copiar):
+                          //   postMessage({ doc, blobs }, blobs.map((b) => b.buffer))
+                          // lanza LibmspubError (error.code === 'unsupported' si no es un .pub)
+pub.toJSON(bytes);        // formato 1 (heredado): parse() con las imágenes otra vez en base64. Gasta memoria.
+pub.toSVG(bytes);         // string[]: una página SVG por elemento (solo para depurar)
+pub.heapBytes();          // tamaño de la memoria del wasm (no se achica nunca: es su pico)
+pub.dispose();            // suelta la instancia para que su memoria se pueda liberar
 // si el wasm hace trap: lanza LibmspubCrash; `await pub.ensure()` crea una instancia nueva
 ```
+
+Quien carga el glue por su cuenta (como OpenImprenta, desde su propio origen) usa las mismas funciones de embind que `parseWithModule()` en `js/libmspub.mjs`:
+
+| Función (embind) | Qué hace |
+|---|---|
+| `inputBuffer(n)` | Reserva `n` bytes **dentro** de la memoria del wasm y devuelve una vista (`Uint8Array`) para llenarla con el archivo. Esa copia se libera apenas libmspub arma su stream. |
+| `parseInput()` | Lee lo que hay en el buffer. Devuelve `{ok, pages, json, blobs, error?, unsupported?}`: `json` es el texto del formato 2 y `blobs`, cuántos bloques binarios quedaron. |
+| `blob(i)` | Vista del bloque `i` dentro de la memoria del wasm. Hay que copiarla (`slice()`) antes de llamar a otra cosa: si la memoria crece, la vista queda inválida. |
+| `release()` | Libera los bloques y la entrada dentro del wasm, para reusar ese espacio con el próximo documento. |
+| `heapSize()` | Tamaño actual de la memoria del wasm, en bytes. |
+
+La memoria de WebAssembly **no se achica nunca**: `release()` deja el espacio libre para el próximo documento, pero para devolverla al sistema hay que soltar la instancia (`dispose()`, o leer cada documento en un worker que después se termina). En Node la memoria de una instancia soltada vuelve después de un par de vueltas del bucle de eventos, no en el mismo `gc()`.
 
 ## Resultados por archivo del corpus
 
@@ -215,17 +245,44 @@ Antes de agregar los datos ICU y la sonda, el build era de 919 KB (-O3) y 819 KB
 
 **Parseo:** el documento más grande (SampleNewsletter, 285 KB y 4 páginas) tarda 24 ms con `toJSON` y 18 ms con `toSVG` en -Oz, y 20 / 17 ms en -O3. Entre -O3 y -Oz no veo una diferencia confiable. Sumando todo el corpus, -O3 fue 15 % más rápido en una corrida y más lento en otra (n chico, ruido entre corridas). **Recomiendo -Oz**, que pesa un 8 % menos.
 
-**Memoria:** el módulo arranca con 32 MB (`INITIAL_MEMORY`) y puede crecer. No medí el pico con el corpus sano. Sin el parche 0002, un mutante llevó el proceso de Node a 1,3 GB de RSS.
+**Actualización del 3/10 (formato 2 y parche 0003):** el `.wasm` -Oz pasa a 1 217 805 bytes (+6,2 KB; 447,8 KB con brotli, +2,8 KB). Los tiempos del corpus POI no cambian de forma medible: sumando los 23 archivos legibles, 70,5 ms antes y 73,2 ms después (mediana de 7 parseos por archivo, una corrida de cada build en la misma máquina: es ruido). El JSON se achica donde había imágenes: 51318 de 59,7 a 7,2 KB, el folleto de 176,9 a 65,6 KB y el boletín de 494,3 a 183,7 KB (sus blobs suman 39, 84 y 231 KB; el boletín usa una imagen dos veces y se entrega una sola). Con `toJSON()` (el formato 1 reconstruido) la salida de los 26 archivos con que lo probé (los 24 de POI, un folleto de plantilla y un trabajo real) es **idéntica** a la del build anterior.
 
-## Esquema del JSON (`toJSON`)
+### Memoria
 
-Todas las longitudes están en **puntos** (1/72 pulgada). El origen es la esquina superior izquierda de la página. Cada nodo trae, además de los campos curados, un `props` con **todas** las propiedades crudas de librevenge, convertidas así: longitudes a pt, porcentajes como cadena (`"50%"`), booleanos como booleanos y binarios omitidos. Los campos curados que no existen valen `null`.
+El módulo arranca con 32 MB (`INITIAL_MEMORY`) y crece cuando hace falta; **la memoria de WebAssembly no se achica nunca**. Sin el parche 0002, un mutante llevó el proceso de Node a 1,3 GB de RSS.
+
+Medido con **un trabajo real de 62 MB (5 páginas, una foto JPEG por página)** en Node 22.23.2 (Windows 11), un proceso nuevo por medición (`node --expose-gc test/measure-memory.mjs`), 5 corridas de cada build, alternadas:
+
+| | Antes (formato 1, base64) | Después (formato 2, blobs) |
+|---|---:|---:|
+| JSON | 17 153 172 bytes (16,4 MB) | 3 761 bytes |
+| Imágenes | adentro del JSON, en base64 | 5 blobs, 12,3 MB |
+| Memoria del wasm después de leer (= su pico, redondeado por el crecimiento) | 390,9 MB | 249,6 MB |
+| Pico de RSS del proceso | 493–500 MB | 368–375 MB |
+| Tiempo de lectura (mediana de 5) | 552 ms | 429 ms |
+
+Los tiempos se midieron con otra carga en la máquina y varían mucho entre corridas (382 a 633 ms): no saco de ahí más que "no empeoró". Las cifras de memoria se repitieron iguales en todas las corridas.
+
+Qué cambió:
+
+1. **Entrada sin copias de más.** Antes el archivo pasaba por embind como `std::string`, que lo copia dos veces dentro del wasm, y después libmspub armaba su stream (tercera copia). Ahora JS escribe el archivo directamente en un buffer del wasm (`inputBuffer`), y ese buffer se libera apenas libmspub tiene su stream.
+2. **Las imágenes no pasan por el JSON.** libmspub entrega cada imagen en base64 (`ImgFill` usa `getBase64Data()`), y el generador la decodifica en C++ a un bloque binario, uno por imagen distinta. Antes ese base64 se copiaba en el estilo vigente, en cada forma, en una copia del árbol para serializar y en el texto JSON; y del lado de JS había otra copia como cadena y otra en el objeto.
+3. **El árbol JSON ya no se copia** para serializar, y el stream del archivo se libera antes de serializar.
+
+Lo que queda en el pico del wasm es de libmspub y librevenge: el stream del archivo (62 MB), la copia de `Escher/EscherDelayStm` que hace librevenge al abrir el substream OLE (casi todo el archivo otra vez, más un vector temporal del mismo tamaño mientras la arma) y las 15 imágenes que libmspub carga aunque solo pinte 5. Bajarlo más ya implica parchear librevenge (substreams sin copia) o libmspub (no cargar las imágenes que no se usan). Liberar el substream apenas se leen las imágenes no ayudaría: el pico ocurre antes, mientras se arma.
+
+## Esquema del JSON (`parse`, formato 2)
+
+Todas las longitudes están en **puntos** (1/72 pulgada). El origen es la esquina superior izquierda de la página. Cada nodo trae, además de los campos curados, un `props` con **todas** las propiedades crudas de librevenge, convertidas así: longitudes a pt, porcentajes como cadena (`"50%"`), booleanos como booleanos y binarios omitidos (`"<binary omitted>"`). Los campos curados que no existen valen `null`.
+
+**Formato 2 (desde el 3/10/2026):** los datos binarios (imágenes y fuentes) **no van en el JSON**. Cada uno es un bloque aparte, y donde el formato 1 tenía `"data": "<base64>"` el formato 2 tiene `"blob": n`, el índice en la lista `blobs` que devuelve `parse()`. La tabla `blobs` del JSON dice el tamaño y el tipo de cada bloque, para comprobar lo que llegó. Una imagen usada en varias formas se entrega una sola vez. `toJSON()` sigue devolviendo el formato 1.
 
 ```jsonc
 {
-  "format": "openimprenta-libmspub-json", "version": 1, "units": "pt",
+  "format": "openimprenta-libmspub-json", "version": 2, "units": "pt",
   "metadata": { "dc:creator": "…", "meta:creation-date": "…" },     // OLE SummaryInformation
-  "embeddedFonts": [ { "name", "mimeType", "data": "<base64>", "props" } ],
+  "embeddedFonts": [ { "name", "mimeType", "blob": 0, "props" } ],
+  "blobs": [ { "size": 39381, "mimeType": "image/png" } ],           // uno por bloque binario, en orden
   "pages": [ {
     "index": 0, "width": 595.2756, "height": 841.8898, "props": {…},
     "elements": [ /* en orden de pintado (z-order) */ ]
@@ -233,7 +290,7 @@ Todas las longitudes están en **puntos** (1/72 pulgada). El origen es la esquin
   "stats": { "calls": { "drawPolygon": 85, … },   // cuántas veces se llamó cada método de librevenge
              "orphanText": 0, "unclosedFrames": 0 },
   // agregados por js/libmspub.mjs:
-  "parseOk": true, "jsonBytes": 494322
+  "parseOk": true, "jsonBytes": 188101
 }
 ```
 
@@ -242,9 +299,9 @@ Elementos (`type`):
 | `type` | Campos |
 |---|---|
 | `polygon`, `polyline`, `path`, `rect`, `ellipse`, `connector` | `geometry` (props de la llamada: `svg:points` = `[{svg:x, svg:y}]`, `svg:d` = `[{librevenge:path-action: "M"\|"L"\|"C"\|"Q"\|"A"\|"Z", svg:x, svg:y, svg:x1, …}]`, `svg:x/y/width/height`, `svg:rx/ry`), `fill`, `stroke`, `shadow` (si hay), `style` (estilo gráfico crudo vigente) |
-| `fill` | `{kind: "none"\|"solid"\|"gradient"\|"bitmap", color: "#rrggbb", opacity, angle, style, stops[], mimeType, repeat: "stretch"\|…, data: "<base64>"}`. **Las imágenes de libmspub llegan así**: un polígono con `fill.kind = "bitmap"` y la imagen en `fill.data`. |
+| `fill` | `{kind: "none"\|"solid"\|"gradient"\|"bitmap", color: "#rrggbb", opacity, angle, style, stops[], mimeType, repeat: "stretch"\|…, blob: n, crop?: {top, right, bottom, left}}`. **Las imágenes de libmspub llegan así**: un polígono con `fill.kind = "bitmap"` y la imagen en el bloque `fill.blob`. `crop` (parche 0003) aparece solo si la imagen está recortada: la fracción de la imagen original que queda oculta de cada lado (0,25 = un cuarto); un valor negativo es un margen alrededor de la imagen, tal como lo guarda Publisher. El polígono es la parte visible: la parte recortada de la imagen se estira a su caja. |
 | `stroke` | `{kind: "none"\|"solid"\|"dash", color, width, opacity, linecap, linejoin}` |
-| `image` | `x, y, width, height, rotate, mimeType, data (base64), props`. Corresponde a `drawGraphicObject`, que libmspub 0.1.5 no usa con este corpus. |
+| `image` | `x, y, width, height, rotate, mimeType, blob, props`. Corresponde a `drawGraphicObject`, que libmspub 0.1.5 no usa con este corpus. |
 | `text` | `x, y, width, height, rotate, padding {top,right,bottom,left}, verticalAlign, columns, columnGap, props, paragraphs[]` |
 | ↳ párrafo | `align, lineHeight, marginTop/Bottom/Left/Right, textIndent, list? {level, ordered}, props, spans[]` |
 | ↳ span | `text` (con `\t` y `\n` para tabulación y salto de línea; se quita la marca de párrafo `\r` que libmspub deja al final), `font, size (pt), bold, italic, underline ("single"…), color, link?, fields?, props` |
@@ -276,10 +333,11 @@ Separo lo **observado** en el corpus de lo **deducido del código** de libmspub 
 6. **WordArt (deducido del código, sin archivo para probar).** libmspub no lee las propiedades `gtext*` de Escher, que guardan el texto y la fuente del WordArt (no están en `EscherFieldIds.h`). Existen las geometrías de las formas `TEXT_*`, así que en el mejor caso llega el contorno sin el texto. No sé si algún archivo del corpus tiene WordArt.
 7. **Tablas.** En Publisher 2002 y posteriores **llegan bien** (observado en Sample, Sample2-4 y \_2010: 3 filas × 2 columnas, anchos de columna, alto de fila y texto por celda; soporta celdas combinadas con `insertCoveredTableCell`). En **98/2000 se pierden**: solo quedan los bordes como líneas y desaparece el texto de las celdas.
 8. **Tipos de forma (observado).** Todo llega como `drawPolygon` (85 en el boletín, 48 en el folleto) o algún `drawPath`. Nunca llegan `drawRectangle` ni `drawEllipse`. Rectángulos, óvalos y autoformas se convierten en polígonos con la rotación ya aplicada, así que se pierde la forma editable ("este es un rectángulo redondeado de 20 % de radio").
-9. **Imágenes (observado).** Llegan como relleno bitmap de un polígono, y el recorte, como `svg:clip-path` de una capa. **9 de 10 imágenes del boletín y 5 de 8 del folleto son WMF**, que ningún navegador muestra. Hace falta un conversor de WMF/EMF a SVG o PNG. libmspub además reconoce DIB (que reconstruye como BMP), PICT y TIFF, que tampoco se ven en el navegador.
+9. **Imágenes (observado).** Llegan como relleno bitmap de un polígono; la forma de la imagen, como `svg:clip-path` de una capa, y desde el parche 0003 el **recorte** (`cropFromTop/Bottom/Left/Right`) como `fill.crop`. **9 de 10 imágenes del boletín y 5 de 8 del folleto son WMF**, que ningún navegador muestra. Hace falta un conversor de WMF/EMF a SVG o PNG. libmspub además reconoce DIB (que reconstruye como BMP), PICT y TIFF, que tampoco se ven en el navegador.
 10. **Fuentes y texto (observado).** Algunos spans llegan sin tamaño (`size: null`, por ejemplo "Contoso Art Gallery" en el folleto), así que hay que suponer el tamaño por defecto. En 98/2000 los nombres de fuente se pierden. No hay fuentes embebidas en el corpus, aunque `defineEmbeddedFont` está soportado.
 11. **Grupos (observado).** `openGroup` no se llama nunca: los grupos llegan aplanados.
 12. **Metadatos.** Sin datos ICU se pierden en silencio el autor y demás cadenas en windows-1252 (corregido en este build). En 98/2000 salen vacíos.
+13. **El área de borrador no llega (observado con un trabajo real, causa leída en el código).** `MSPUBParser::getPageTypeBySeqNum()` declara fijos los registros de página `0x10d`, `0x110`, `0x113` y `0x117` como `DUMMY_PAGE`. Para ellos `parsePageChunk()` no llama a `addPage()`, pero sus formas igual se asignan a esa página (`setShapePage`); después `assignShapesToPages()` no encuentra la página y las descarta sin aviso. En un trabajo real de 62 MB (5 páginas, una foto JPEG por página), que guarda 15 imágenes, la traza nativa (`tools/native`, `DEBUG=1`) muestra las 5 imágenes de las páginas en sus registros normales y las otras 10 (9 formas, una de ellas un grupo de dos) en la lista del registro `0x10d`: ninguna llega al JSON. Que `0x10d` sea el área de borrador de Publisher es una **interpretación** (libmspub no lo nombra así), consistente con que esas imágenes no se ven en ninguna página. En una prueba local, sacando `0x10d` de esa lista, el registro sale como una página más con sus 10 imágenes; no lo dejé así porque no hay forma de distinguirla de una página real.
 
 ### El SVG de librevenge 0.0.5 solo sirve para depurar
 
@@ -302,6 +360,9 @@ Por eso el camino para OpenImprenta es `toJSON` más nuestro propio render o lay
   | Parches 0001 + 0002 | 500 (semilla 1) | 95 | 329 | 76 | 0 | 0 |
   | Parches 0001 + 0002 | 500 (semilla 2) | 81 | 337 | 82 | 0 | 0 |
   | Parches 0001 + 0002 | 5000 (semilla 3) | 749 | 3469 | 782 | 0 | 0 |
+  | 0001 + 0002 + 0003, formato 2 (3/10) | 500 (semilla 1) | 95 | 329 | 76 | 0 | 0 |
+  | 0001 + 0002 + 0003, formato 2 (3/10) | 500 (semilla 2) | 81 | 337 | 82 | 0 | 0 |
+  | 0001 + 0002 + 0003, formato 2 (3/10) | 5000 (semilla 3) | 749 | 3469 | 782 | 0 | 0 |
 
   Esto no reemplaza un fuzzer guiado por cobertura: es una prueba de humo.
 - **Los 6 cuelgues eran específicos de wasm.** En wasm, 4 tardaban 18–24 s por parseo (con 1,3 GB de RSS) y 2 no terminaban en 120 s. Con libmspub nativo x86-64, los mismos 6 archivos terminan en 120–245 ms (y 2 incluso producen salida). Con el perfil de CPU y la traza de depuración encontré la causa (ver el parche 0002).
@@ -322,7 +383,27 @@ libmspub hace `input->seek(offset + largoLeídoDelArchivo, SET)`, y `RVNGInputSt
 
 En x86-64 ese offset es positivo, cae fuera del stream y el bucle termina. El parche acota `contentsLength` (en `parseEscherContainer`) y `dataLength` (en los bloques de largo variable de `parseBlock`) a lo que queda del stream. En archivos válidos no cambia nada: la salida del corpus es idéntica byte a byte.
 
-Ambos parches son chicos y razonables para mandar upstream (Gerrit de LibreOffice, componente libmspub).
+### 0003: recorte de imagen (`cropFromTop/Bottom/Left/Right`)
+
+Publisher guarda el recorte de una imagen en el registro FOPT de la forma, junto al id de la imagen (`pib`): son las propiedades Blip de [MS-ODRAW] `cropFromTop` (0x0100), `cropFromBottom` (0x0101), `cropFromLeft` (0x0102) y `cropFromRight` (0x0103), en punto fijo 16.16 con signo, como fracción de la imagen. libmspub no las leía, así que una imagen recortada llegaba entera, estirada al marco visible.
+
+El parche las lee en `MSPUBParser::parseEscherShape()` (solo si hay `pib` y alguna es distinta de 0), las guarda en `ShapeInfo` y `ImgFill::getProperties()` las agrega a la lista de propiedades del relleno bitmap, con nombres propios (no hay propiedad ODF para esto) y unidad `RVNG_GENERIC`:
+
+| Propiedad | Valor |
+|---|---|
+| `libmspub:crop-from-top` | fracción del alto de la imagen oculta arriba |
+| `libmspub:crop-from-bottom` | fracción del alto oculta abajo |
+| `libmspub:crop-from-left` | fracción del ancho oculta a la izquierda |
+| `libmspub:crop-from-right` | fracción del ancho oculta a la derecha |
+
+Los valores pasan tal cual (un negativo es un margen alrededor de la imagen). El generador JSON los resume en `fill.crop = {top, right, bottom, left}` y los deja crudos en `style`. Cubre la ruta Escher (Publisher 2002 y posteriores); `MSPUBParser2k` (98/2000) no cambia.
+
+**Cómo se probó:**
+- **Bytes armados según MS-ODRAW** (`test/crop-fopt.mjs`, en CI): ningún archivo de POI tiene recorte, así que la prueba toma `51318.pub`, busca el registro FOPT (0xF00B) con `pib` (0x4104) y reemplaza las cuatro distancias de ajuste del texto (0x0384–0x0387, que libmspub ignora) por las cuatro de recorte con 0,25 / 0,125 / 0,1 / −0,05. El registro no cambia de largo, así que el contenedor OLE sigue válido. Resultado: `fill.crop = {top: 0.25, right: -0.05, bottom: 0.125, left: 0.1}`, los bytes de la imagen iguales y el resto del JSON idéntico. **Control negativo:** con el mismo binding y sin el parche 0003, la misma prueba falla (`fill.crop` no aparece).
+- **Un archivo real:** el único recorte del trabajo real de 62 MB está en una forma del área de borrador (punto 13 de "Qué información se pierde"), así que con el build normal no llega al JSON. Con un build local que además emite el registro `0x10d` como página, llega `fill.crop = {top: 0.8872, right: 0, bottom: 0, left: 0.684}`, exactamente lo que da leer los bytes del registro FOPT de esa forma (el de `pib` = 8) directamente del archivo: 0,8872 arriba y 0,6840 a la izquierda, sin los otros dos lados. Ese build fue solo para la prueba.
+- Con el parche, la salida de los 24 archivos de POI no cambia (no tienen recorte): `toJSON()` da lo mismo que antes.
+
+Los tres parches son chicos y razonables para mandar upstream (Gerrit de LibreOffice, componente libmspub).
 
 ## Recomendación
 

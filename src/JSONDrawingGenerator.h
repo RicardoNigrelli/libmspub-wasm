@@ -39,14 +39,30 @@ struct Json
   void serialize(std::string &out) const;
 };
 
+// A binary payload (picture or font) kept out of the JSON. The JSON refers to
+// it by its index in the list ("blob": n).
+struct Blob
+{
+  std::vector<unsigned char> data;
+  std::string mimeType;
+};
+
+// Decodes standard base64 (as written by librevenge) into `out`. Whitespace
+// is skipped; any other character outside the alphabet makes it fail.
+bool decodeBase64(const char *in, size_t len, std::vector<unsigned char> &out);
+
 class JSONDrawingGenerator : public librevenge::RVNGDrawingInterface
 {
 public:
   JSONDrawingGenerator();
   ~JSONDrawingGenerator() override;
 
-  std::string result() const;
+  // Serializes the document (JSON format version 2). Call it once, after
+  // parsing: it moves the call statistics into the tree.
+  std::string result();
   unsigned pageCount() const;
+  // Hands over the binary payloads referenced by the JSON ("blob": n).
+  std::vector<Blob> takeBlobs();
 
   void startDocument(const librevenge::RVNGPropertyList &propList) override;
   void endDocument() override;
@@ -119,10 +135,15 @@ private:
   bool pop(Kind kind);                   // pops up to (and including) kind
   bool inStack(Kind kind) const;
   void addShape(const char *type, const librevenge::RVNGPropertyList &propList);
+  // Decodes a base64 property into a blob (identical payloads are stored
+  // once) and returns its index as JSON, or null if there is no valid data.
+  Json blobFrom(const librevenge::RVNGProperty *prop, const librevenge::RVNGProperty *mimeType);
+  Json summarizeStyle(const librevenge::RVNGPropertyList &style);
   Json *ensureParagraph();
   Json *ensureSpan();
 
   Json m_doc;
+  std::vector<Blob> m_blobs;
   Json m_style;                          // current graphic style (raw props)
   std::vector<Frame> m_stack;
   std::map<std::string, unsigned> m_calls;
@@ -134,7 +155,9 @@ private:
 };
 
 // Converts a property list to JSON: lengths in points, percentages as
-// strings ("50%"), booleans as booleans, binary data as base64 strings.
-Json propsToJson(const librevenge::RVNGPropertyList &propList, bool dropBinary = false);
+// strings ("50%"), booleans as booleans. Binary data (office:binary-data,
+// draw:fill-image) becomes "<binary omitted>" unless dropBinary is false; the
+// payload itself travels as a blob.
+Json propsToJson(const librevenge::RVNGPropertyList &propList, bool dropBinary = true);
 
 } // namespace oi
